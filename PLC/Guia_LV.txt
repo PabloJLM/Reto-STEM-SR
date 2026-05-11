@@ -1,0 +1,161 @@
+# LabVIEW HMI - Guia de implementacion
+# Arduino Opta TCP/IP JSON Demo
+# ============================================================
+#
+# ESTRUCTURA DEL VI PRINCIPAL (Main_Opta_HMI.vi)
+# ============================================================
+#
+# Front Panel:
+#   - IP Address (String Control)             -> "192.168.1.100"
+#   - Port (Numeric Control)                  -> 8888
+#   - Poll Interval ms (Numeric Control)      -> 200
+#   - CONNECT button (Boolean)
+#   - DISCONNECT button (Boolean)
+#   - Status indicator (String Indicator)
+#
+#   ENTRADAS (I1..I8):
+#   - 8x Numeric Indicators (Gauge o Tank)    -> voltaje 0-10V
+#   - 8x Numeric Indicators (valor raw)       -> 0-4095
+#
+#   RELAYS (D0..D3):
+#   - 4x Boolean Controls (Toggle switch)     -> SET_RELAY n v
+#   - 4x LED Indicators (estado actual)
+#
+#   LEDs DE ESTADO:
+#   - 4x Boolean Controls (LED D0-D3)         -> SET_LED_STATUS n v
+#   - Boolean Control (LED Usuario azul)      -> SET_LED_USER v
+#   - Boolean Control (LED Rojo)              -> SET_LED_R v
+#
+#   BOTON USUARIO:
+#   - Boolean Indicator (lectura del BTN_USER fisico)
+#
+# ============================================================
+# BLOCK DIAGRAM - Estructura
+# ============================================================
+#
+# 1. CONEXION
+# -----------
+# TCP Open Connection.vi
+#   address  <- IP Control
+#   port     <- Port Control
+#   timeout  <- 5000 ms
+#   connection ID -> wire al While Loop
+#
+# 2. WHILE LOOP PRINCIPAL (polling)
+# ----------------------------------
+# Dentro del While Loop:
+#
+#   a) GET_STATUS cada N ms
+#      TCP Write.vi
+#        connection ID
+#        data string: "GET_STATUS\n"
+#      TCP Read.vi
+#        connection ID
+#        bytes to read: 1024
+#        mode: CRLF (leer hasta \n)
+#      -> String con JSON
+#
+#   b) PARSEO JSON (usar "Flatten/Unflatten JSON")
+#      LabVIEW 2019+ tiene JSON functions nativas:
+#        "Unflatten from JSON" -> cluster o variant
+#
+#      Alternativa compatible con versiones antiguas:
+#        Usar "Match Regular Expression" o scripting
+#        O instalar "JSONtext" (toolkit gratuito de JDP Science)
+#
+#      Extraer campos:
+#        inputs_v[0..7]    -> Gauge indicators
+#        relays[0..3]      -> LED indicators
+#        leds_status[0..3] -> LED indicators
+#        led_user          -> LED indicator
+#        led_r             -> LED indicator
+#        btn_user          -> Boolean indicator
+#
+#   c) ENVIO DE COMANDOS (event-driven dentro del loop)
+#      Event Structure con casos:
+#
+#      Caso "Relay 0 toggle":
+#        leer valor del Boolean Control relay_0
+#        TCP Write: "SET_RELAY 0 " + num2str(val) + "\n"
+#        TCP Read: respuesta ACK (opcional)
+#
+#      Caso "LED D0 change":
+#        TCP Write: "SET_LED_STATUS 0 " + num2str(val) + "\n"
+#
+#      Caso "LED User change":
+#        TCP Write: "SET_LED_USER " + num2str(val) + "\n"
+#
+#      Caso "LED R change":
+#        TCP Write: "SET_LED_R " + num2str(val) + "\n"
+#
+#      Caso "DISCONNECT":
+#        set stop = true
+#
+#   d) Wait (ms): Poll Interval control
+#
+# 3. CIERRE
+# ---------
+# TCP Close Connection.vi
+#   connection ID
+#
+# ============================================================
+# NOTAS DE IMPLEMENTACION LABVIEW
+# ============================================================
+#
+# Parseo JSON sin toolkit externo (workaround):
+# LabVIEW puede parsear JSON con "Flatten to JSON / Unflatten from JSON"
+# Define un typedef cluster que coincida con el JSON:
+#
+#   Cluster "Opta_Status":
+#     inputs:      Array of DBL [8]
+#     inputs_v:    Array of DBL [8]
+#     relays:      Array of Bool [4]
+#     leds_status: Array of Bool [4]
+#     led_user:    Bool
+#     led_r:       Bool
+#     btn_user:    Bool
+#
+# Usar "Unflatten from JSON.vi" con ese cluster como type descriptor.
+# IMPORTANTE: el orden de campos en el cluster debe coincidir con el JSON.
+#
+# Alternativa mas robusta: JSONtext toolkit
+# https://www.jdpscience.com/tools/json
+# (gratuito, compatible LabVIEW 2014+)
+#
+# ============================================================
+# MANEJO DE ERRORES
+# ============================================================
+#
+# - Wired error clusters en toda la cadena TCP
+# - Simple Error Handler.vi al final del loop
+# - Si error code != 0: mostrar en Status indicator, cerrar conexion
+# - Timeout de TCP Read: 1000 ms recomendado
+# - Si el Opta se desconecta, TCP Read retorna error 56 (connection closed)
+#   -> el loop debe detectarlo y intentar reconexion o parar
+#
+# ============================================================
+# TIPS DE PERFORMANCE
+# ============================================================
+#
+# - Poll interval minimo recomendado: 100ms (el Opta puede responder mas rapido)
+# - No enviar comandos dentro del mismo tick que GET_STATUS
+#   (usar Notifier o Queue para serializar writes)
+# - TCP es full-duplex pero el firmware es half-duplex request/response
+#   -> siempre esperar respuesta antes del siguiente comando
+# - Si necesitas polling < 50ms considera cambiar a UDP en el firmware
+#
+# ============================================================
+# PROTOCOLO COMPLETO - REFERENCIA RAPIDA
+# ============================================================
+#
+# COMANDO              RESPUESTA
+# GET_STATUS           {"inputs":[...],"inputs_v":[...],"relays":[...],...}
+# SET_RELAY n v        {"ok":true,"relay":n,"val":v}
+# SET_LED_STATUS n v   {"ok":true,"led":n,"val":v}
+# SET_LED_USER v       {"ok":true,"led_user":v}
+# SET_LED_R v          {"ok":true,"led_r":v}
+# SET_ALL_RELAYS v     {"ok":true,"all_relays":v}
+# TOGGLE_RELAY n       {"ok":true,"relay":n,"val":nuevo_estado}
+#
+# n = 0..3, v = 0 o 1
+# Todos los comandos terminan en \n
